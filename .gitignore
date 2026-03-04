@@ -3,3 +3,5 @@
 *.o
 set_battery
 System Settings.app/
+batteryd
+*.dylib

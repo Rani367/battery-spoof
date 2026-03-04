@@ -2,47 +2,81 @@
 
 experimenting with spoofing the battery health percentage on a macbook air m2 running macos tahoe (26.3). purely software, no hardware mods.
 
+this was done on a macbook that's about to be thrown out, so the whole point was to poke around and see what's possible. turns out, it's possible — but apple made it *really* annoying to get there.
+
 ## the working solution
 
-the final approach uses [Frida](https://frida.re) to hook into the `PowerPreferences` extension process (the thing that renders the Battery pane in System Settings) and:
+there are two versions — a quick Frida-based approach and a permanent native daemon.
+
+### option A: native daemon (persistent, survives factory reset)
+
+a tiny native arm64e binary (`batteryd`) that runs as a LaunchDaemon. it monitors for the `PowerPreferences` extension process, freezes it with `SIGSTOP` before it can render the UI, patches `+[PLBatteryUIBackendModel getMaximumCapacity]` in memory using Mach VM remap (to bypass Apple Silicon's W^X enforcement), then resumes it. zero dependencies — no Python, no Frida.
+
+#### setup
+
+```bash
+# 1. disable SIP + authenticated root (from Recovery Mode — hold power button at boot)
+#    Utilities > Terminal:
+csrutil disable
+csrutil authenticated-root disable
+#    reboot
+
+# 2. set boot arg
+sudo nvram boot-args="-arm64e_preview_abi"
+#    reboot
+
+# 3. compile and install
+xcrun --sdk macosx clang -arch arm64e -framework Foundation -o batteryd batteryd.m
+./before-reboot.sh
+
+# 4. for factory reset survival: (requires one more reboot to Recovery for authenticated-root)
+./after-reboot.sh
+```
+
+the daemon starts at boot. open System Settings > Battery and it just shows 65%. to change the percentage, edit the `65` in `com.battery.spoof.plist` and reboot.
+
+### option B: frida one-shot (quick, temporary)
+
+uses [Frida](https://frida.re) to hook into `PowerPreferences` at runtime:
 
 1. hooks `PLBatteryUIBackendModel.getMaximumCapacity` to return a fake value
 2. patches the `BatteryHealthViewModel`'s cached percentage at memory offset `0x68`
 3. fires KVO (Key-Value Observing) notifications to trick SwiftUI into re-rendering
 
-### requirements
-
-- macOS on Apple Silicon (tested on macOS 26.3 Tahoe, MacBook Air M2)
-- SIP disabled (`csrutil disable` from Recovery Mode)
-- Frida installed (`pip3 install frida-tools`)
-- `arm64e_preview_abi` boot arg set (`sudo nvram boot-args="-arm64e_preview_abi"`)
-
-### usage
-
 ```bash
+pip3 install frida-tools
 ./spoof.sh 65     # show 65% health
 ./spoof.sh 100    # look brand new
 ./spoof.sh 42     # the answer to everything
 ./spoof.sh 1      # pain
 ```
 
-after it attaches, close the Battery Health info popup (click Done) and reopen it by clicking the (i) icon. the new percentage should appear.
+after it attaches, close the Battery Health info popup (click Done) and reopen it by clicking the (i) icon. the new percentage should appear. press Ctrl+C to detach. the real value comes back next time you open Settings.
 
-press Ctrl+C to detach. the real value comes back next time you open Settings.
+#### requirements (both options)
 
-### setup (one-time)
+- macOS on Apple Silicon (tested on macOS 26.3 Tahoe, MacBook Air M2)
+- SIP disabled (`csrutil disable` from Recovery Mode)
+- `arm64e_preview_abi` boot arg set (`sudo nvram boot-args="-arm64e_preview_abi"`)
 
-```bash
-# 1. disable SIP (from Recovery Mode — hold power button at boot)
-#    Utilities > Terminal > csrutil disable > reboot
+## how the native daemon works
 
-# 2. set boot arg for arm64e (needed for Frida on system processes)
-sudo nvram boot-args="-arm64e_preview_abi"
-# reboot
+the daemon (`batteryd.m`) does the following every 50ms:
 
-# 3. install frida
-pip3 install frida-tools
-```
+1. polls `proc_listpids` for a process named `PowerPreferences`
+2. when found, immediately sends `SIGSTOP` to freeze it before the UI renders
+3. uses `task_for_pid` to get the Mach task port
+4. reads `TASK_DYLD_INFO` to find the binary's base address in the target process
+5. computes the method address: `base + 0x46c4` (offset of `getMaximumCapacity` in the PowerPreferences binary)
+6. uses the **remap technique** to patch executable memory on Apple Silicon:
+   - allocates a temporary RW page in the target
+   - copies the original code page to it
+   - writes `movz x0, #65; ret` (two arm64 instructions) over the method
+   - remaps the patched page over the original with `mach_vm_remap`
+   - sets the page back to RX
+7. sends `SIGCONT` to resume the process — it continues initializing with our patched method
+
+the remap technique is necessary because Apple Silicon enforces W^X (write XOR execute) at the hardware level via APRR. you can't simply `mach_vm_protect` a code page to be writable.
 
 ## the journey (everything we tried)
 
@@ -127,9 +161,9 @@ dumped the `BatteryHealthViewModel` instance's raw memory and found:
 
 patched it to 65 in memory. but the UI didn't update — SwiftUI only re-renders when state changes are signaled through Combine/KVO, not when underlying memory changes silently.
 
-### attempt 9: the fix (KVO notifications)
+### attempt 9: KVO notifications (Frida solution)
 
-the final piece: after patching the memory, fire KVO (Key-Value Observing) notifications on the view model. this tells SwiftUI "hey, a property changed, re-render please":
+the final piece for the Frida approach: after patching the memory, fire KVO (Key-Value Observing) notifications on the view model. this tells SwiftUI "hey, a property changed, re-render please":
 
 ```javascript
 vm.willChangeValueForKey_("maximumCapacity");
@@ -140,6 +174,20 @@ we don't know the exact property names (they're Swift-only, not visible to the O
 
 **result: it works.** close and reopen the Battery Health popup and it shows 65% (or whatever you set).
 
+### attempt 10: native daemon with SIGSTOP + mach_vm_remap (permanent solution)
+
+the Frida approach works but requires running a script. for a fully automatic solution, we wrote a native arm64e daemon that:
+
+1. monitors for `PowerPreferences` via `proc_listpids`
+2. freezes it with `SIGSTOP` before the UI renders
+3. uses `task_for_pid` + `TASK_DYLD_INFO` to find the binary base
+4. patches the method at offset `0x46c4` using the remap technique (allocate RW page → copy code → patch → `mach_vm_remap` over original → set RX)
+5. resumes with `SIGCONT`
+
+installed as a LaunchDaemon on the system volume, it starts at boot and patches every time you open Battery settings. survives factory reset.
+
+**result: fully automatic, zero dependencies, persistent.**
+
 ## key discoveries
 
 - **battery health on apple silicon is hardware-enforced.** the value comes from the Secure Enclave / PMU, flows through a kernel driver that rejects all writes, through `powerd` which caches it, through `IOPowerSources` XPC, into the UI. you can't change it at the source.
@@ -148,17 +196,27 @@ we don't know the exact property names (they're Swift-only, not visible to the O
 
 - **the health percentage comes from `NominalChargeCapacity / DesignCapacity`.** on our machine: 4061 / 4563 = 89%. not from `MaxCapacity` (which is just current charge level = 100) and not from `AppleRawMaxCapacity` (which is 3934).
 
-- **`PLBatteryUIBackendModel.getMaximumCapacity`** is the single class method that returns the health percentage to the UI. it's in Apple's private `PowerLog` framework.
+- **`PLBatteryUIBackendModel.getMaximumCapacity`** is the single class method that returns the health percentage to the UI. it lives inside the `PowerPreferences` binary itself (not a shared framework).
 
-- **SwiftUI views won't update from raw memory patches.** you need to trigger the Combine/KVO pipeline. firing `willChangeValueForKey:` / `didChangeValueForKey:` on the view model does the trick.
+- **SwiftUI views won't update from raw memory patches.** you need to trigger the Combine/KVO pipeline. firing `willChangeValueForKey:` / `didChangeValueForKey:` on the view model does the trick (Frida approach), or just patch before the UI loads (native daemon approach).
 
 - **DYLD interposing is basically dead on arm64e.** pointer authentication makes it nearly impossible to inject dylibs into system processes, even with SIP disabled.
+
+- **Apple Silicon enforces W^X at the hardware level.** you can't `mach_vm_protect` a code page to be writable. the workaround is the remap technique: allocate a new RW page, copy + patch, then `mach_vm_remap` it over the original and set RX.
+
+- **PAC (Pointer Authentication) hides real addresses.** Frida returns PAC-signed pointers like `0xc349000102...` — you need `.strip()` to get the actual address (`0x102...`).
 
 ## files
 
 ```
-spoof.sh                 — main script, run this
+batteryd.m               — native daemon source (the permanent solution)
+batteryd.c               — earlier C version (couldn't load the ObjC class)
+com.battery.spoof.plist  — LaunchDaemon plist
+before-reboot.sh         — install daemon to /Library/LaunchDaemons
+after-reboot.sh          — install to system volume (factory reset survival)
+spoof.sh                 — frida one-shot script
 spoof.js                 — frida hook script
+daemon.py                — python/frida daemon (replaced by native)
 failed-attempts/         — everything that didn't work (see above)
   set_battery.c          — IOKit registry write attempt
   interpose.c            — DYLD_INSERT_LIBRARIES attempt
@@ -173,4 +231,4 @@ failed-attempts/         — everything that didn't work (see above)
 
 ## disclaimer
 
-this is a cosmetic-only change. it only affects what System Settings displays while Frida is attached. it doesn't change `ioreg` output, doesn't affect battery behavior, and reverts when you close Settings. it was done for fun on a machine that's being recycled.
+this is a cosmetic-only change. it only affects what System Settings displays. it doesn't change `ioreg` output, doesn't affect actual battery behavior, and doesn't fool third-party tools like coconutBattery. it was done for fun on a machine that's being recycled.
