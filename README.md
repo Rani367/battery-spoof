@@ -2,8 +2,6 @@
 
 experimenting with spoofing the battery health percentage on a macbook air m2 running macos tahoe (26.3). purely software, no hardware mods.
 
-this was done on a macbook that's about to be thrown out, so the whole point was to poke around and see what's possible. turns out, it's possible — but apple made it *really* annoying to get there.
-
 ## the working solution
 
 the final approach uses [Frida](https://frida.re) to hook into the `PowerPreferences` extension process (the thing that renders the Battery pane in System Settings) and:
