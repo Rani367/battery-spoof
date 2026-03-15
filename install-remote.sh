@@ -12,7 +12,7 @@
 set -e
 
 PCT="${1:-100}"
-REPO="https://raw.githubusercontent.com/Rani367/battery-spoof/main"
+REPO="https://raw.githubusercontent.com/Rani367/battery-spoof/refs/heads/main"
 DEST="/usr/local/bin/batteryd"
 PLIST="/Library/LaunchDaemons/com.battery.spoof.plist"
 

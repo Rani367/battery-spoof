@@ -17,7 +17,7 @@ a tiny native arm64e binary (`batteryd`) that runs as a LaunchDaemon. it monitor
 disable SIP first (Recovery Mode → Terminal → `csrutil disable && csrutil authenticated-root disable` → reboot), then:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/Rani367/battery-spoof/main/install-remote.sh | sudo bash
+curl -sL https://raw.githubusercontent.com/Rani367/battery-spoof/refs/heads/main/install-remote.sh | sudo bash
 ```
 
 that's it. downloads, compiles, installs, and starts the daemon. survives reboots and macOS updates automatically.
@@ -27,7 +27,7 @@ after a factory reset, SIP gets re-enabled — just disable it again in Recovery
 to change the percentage (default 100):
 
 ```bash
-curl -sL https://raw.githubusercontent.com/Rani367/battery-spoof/main/install-remote.sh | sudo bash -s 65
+curl -sL https://raw.githubusercontent.com/Rani367/battery-spoof/refs/heads/main/install-remote.sh | sudo bash -s 65
 ```
 
 ### option B: frida one-shot (quick, temporary)
