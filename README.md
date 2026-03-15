@@ -8,32 +8,27 @@ this was done on a macbook that's about to be thrown out, so the whole point was
 
 there are two versions — a quick Frida-based approach and a permanent native daemon.
 
-### option A: native daemon (persistent, survives factory reset)
+### option A: native daemon (persistent, survives updates)
 
-a tiny native arm64e binary (`batteryd`) that runs as a LaunchDaemon. it monitors for the `PowerPreferences` extension process, freezes it with `SIGSTOP` before it can render the UI, patches `+[PLBatteryUIBackendModel getMaximumCapacity]` in memory using Mach VM remap (to bypass Apple Silicon's W^X enforcement), then resumes it. zero dependencies — no Python, no Frida.
+a tiny native arm64e binary (`batteryd`) that runs as a LaunchDaemon. it monitors for the `PowerPreferences` extension process, freezes it with `SIGSTOP` before it can render the UI, patches `+[PLBatteryUIBackendModel getMaximumCapacity]` in memory using Mach VM remap (to bypass Apple Silicon's W^X enforcement), then resumes it. zero dependencies — no Python, no Frida. dynamically finds the method offset by parsing the binary's symbol table, so it works across macOS updates.
 
-#### setup
+#### one-liner install
+
+disable SIP first (Recovery Mode → Terminal → `csrutil disable && csrutil authenticated-root disable` → reboot), then:
 
 ```bash
-# 1. disable SIP + authenticated root (from Recovery Mode — hold power button at boot)
-#    Utilities > Terminal:
-csrutil disable
-csrutil authenticated-root disable
-#    reboot
-
-# 2. set boot arg
-sudo nvram boot-args="-arm64e_preview_abi"
-#    reboot
-
-# 3. compile and install
-xcrun --sdk macosx clang -arch arm64e -framework Foundation -o batteryd batteryd.m
-./before-reboot.sh
-
-# 4. for factory reset survival: (requires one more reboot to Recovery for authenticated-root)
-./after-reboot.sh
+curl -sL https://raw.githubusercontent.com/Rani367/battery-spoof/main/install-remote.sh | sudo bash
 ```
 
-the daemon starts at boot. open System Settings > Battery and it just shows 65%. to change the percentage, edit the `65` in `com.battery.spoof.plist` and reboot.
+that's it. downloads, compiles, installs, and starts the daemon. survives reboots and macOS updates automatically.
+
+after a factory reset, SIP gets re-enabled — just disable it again in Recovery and re-run the one-liner.
+
+to change the percentage (default 100):
+
+```bash
+curl -sL https://raw.githubusercontent.com/Rani367/battery-spoof/main/install-remote.sh | sudo bash -s 65
+```
 
 ### option B: frida one-shot (quick, temporary)
 
