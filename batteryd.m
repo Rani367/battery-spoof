@@ -16,70 +16,33 @@
 #import <sys/mman.h>
 #import <sys/stat.h>
 #import <fcntl.h>
+#import <mach-o/fat.h>
 
 #define PP_PATH "/System/Library/ExtensionKit/Extensions/PowerPreferences.appex/Contents/MacOS/PowerPreferences"
 #define TARGET_SYMBOL "+[PLBatteryUIBackendModel getMaximumCapacity]"
 
-// Parse the PowerPreferences Mach-O binary to find the method offset dynamically
+// Find method offset by running nm on the binary (handles fat binaries, arm64e, chained fixups)
 static uint64_t find_method_offset(void) {
-    int fd = open(PP_PATH, O_RDONLY);
-    if (fd < 0) { perror("[!] open PowerPreferences"); return 0; }
+    FILE *f = popen(
+        "nm -arch arm64e '" PP_PATH "' 2>/dev/null"
+        " | grep '\\+\\[PLBatteryUIBackendModel getMaximumCapacity\\]$'",
+        "r"
+    );
+    if (!f) { perror("[!] popen nm"); return 0; }
 
-    struct stat st;
-    fstat(fd, &st);
-    void *map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED) { perror("[!] mmap"); return 0; }
-
-    struct mach_header_64 *hdr = (struct mach_header_64 *)map;
-    if (hdr->magic != MH_MAGIC_64) {
-        fprintf(stderr, "[!] Not a 64-bit Mach-O\n");
-        munmap(map, st.st_size);
-        return 0;
-    }
-
-    // Find LC_SYMTAB and LC_SEGMENT_64(__TEXT) for base vmaddr
-    struct symtab_command *symtab = NULL;
-    uint64_t text_vmaddr = 0;
-    struct load_command *lc = (struct load_command *)((uint8_t *)hdr + sizeof(*hdr));
-
-    for (uint32_t i = 0; i < hdr->ncmds; i++) {
-        if (lc->cmd == LC_SYMTAB) {
-            symtab = (struct symtab_command *)lc;
-        } else if (lc->cmd == LC_SEGMENT_64) {
-            struct segment_command_64 *seg = (struct segment_command_64 *)lc;
-            if (strcmp(seg->segname, "__TEXT") == 0) {
-                text_vmaddr = seg->vmaddr;
-            }
-        }
-        lc = (struct load_command *)((uint8_t *)lc + lc->cmdsize);
-    }
-
-    if (!symtab) {
-        fprintf(stderr, "[!] No symbol table found\n");
-        munmap(map, st.st_size);
-        return 0;
-    }
-
-    // Walk the symbol table
-    struct nlist_64 *syms = (struct nlist_64 *)((uint8_t *)map + symtab->symoff);
-    char *strtab = (char *)map + symtab->stroff;
+    char line[512];
     uint64_t offset = 0;
-
-    for (uint32_t i = 0; i < symtab->nsyms; i++) {
-        if (syms[i].n_un.n_strx == 0) continue;
-        const char *name = strtab + syms[i].n_un.n_strx;
-        if (strcmp(name, TARGET_SYMBOL) == 0) {
-            uint64_t addr = syms[i].n_value;
-            offset = addr - text_vmaddr;
-            fprintf(stderr, "[*] Found %s at vmaddr=0x%llx offset=0x%llx\n",
-                    TARGET_SYMBOL, addr, offset);
-            break;
+    if (fgets(line, sizeof(line), f)) {
+        uint64_t addr = 0;
+        if (sscanf(line, "%llx", &addr) == 1 && addr > 0x100000000) {
+            offset = addr - 0x100000000; // subtract standard __TEXT base
+            fprintf(stderr, "[*] Found getMaximumCapacity at vmaddr=0x%llx offset=0x%llx\n",
+                    addr, offset);
         }
     }
+    pclose(f);
 
-    munmap(map, st.st_size);
-    if (offset == 0) fprintf(stderr, "[!] Symbol not found: %s\n", TARGET_SYMBOL);
+    if (offset == 0) fprintf(stderr, "[!] Symbol not found via nm\n");
     return offset;
 }
 
