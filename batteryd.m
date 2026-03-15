@@ -17,32 +17,64 @@
 #import <sys/stat.h>
 #import <fcntl.h>
 #import <mach-o/fat.h>
+#import <objc/runtime.h>
+#import <dlfcn.h>
+#import <ptrauth.h>
 
 #define PP_PATH "/System/Library/ExtensionKit/Extensions/PowerPreferences.appex/Contents/MacOS/PowerPreferences"
 #define TARGET_SYMBOL "+[PLBatteryUIBackendModel getMaximumCapacity]"
 
-// Find method offset by running nm on the binary (handles fat binaries, arm64e, chained fixups)
+// Find method offset by loading the PowerPreferences binary via dlopen + ObjC runtime.
+// Falls back to nm if dlopen doesn't work. No hardcoded offsets.
 static uint64_t find_method_offset(void) {
+    uint64_t offset = 0;
+
+    // Method 1: Load the binary and use ObjC runtime (no CLT dependency)
+    void *handle = dlopen(PP_PATH, RTLD_LAZY | RTLD_LOCAL);
+    if (handle) {
+        Class cls = objc_getClass("PLBatteryUIBackendModel");
+        if (cls) {
+            Method m = class_getClassMethod(cls, sel_registerName("getMaximumCapacity"));
+            if (m) {
+                IMP imp = method_getImplementation(m);
+                // Strip PAC signature bits from the pointer
+                void *imp_stripped = ptrauth_strip((void *)imp, ptrauth_key_function_pointer);
+                Dl_info info;
+                if (dladdr(imp_stripped, &info) && info.dli_fbase) {
+                    offset = (uint64_t)imp_stripped - (uint64_t)info.dli_fbase;
+                    fprintf(stderr, "[*] Found getMaximumCapacity via ObjC runtime, offset=0x%llx\n", offset);
+                    return offset;
+                }
+            } else {
+                fprintf(stderr, "[!] ObjC: getMaximumCapacity method not found\n");
+            }
+        } else {
+            fprintf(stderr, "[!] ObjC: PLBatteryUIBackendModel class not found after dlopen\n");
+        }
+    } else {
+        fprintf(stderr, "[!] dlopen failed: %s\n", dlerror());
+    }
+
+    // Method 2: Fall back to nm (requires Xcode CLT)
+    fprintf(stderr, "[*] Trying nm fallback...\n");
     FILE *f = popen(
         "nm -arch arm64e '" PP_PATH "' 2>/dev/null"
         " | grep '\\+\\[PLBatteryUIBackendModel getMaximumCapacity\\]$'",
         "r"
     );
-    if (!f) { perror("[!] popen nm"); return 0; }
-
-    char line[512];
-    uint64_t offset = 0;
-    if (fgets(line, sizeof(line), f)) {
-        uint64_t addr = 0;
-        if (sscanf(line, "%llx", &addr) == 1 && addr > 0x100000000) {
-            offset = addr - 0x100000000; // subtract standard __TEXT base
-            fprintf(stderr, "[*] Found getMaximumCapacity at vmaddr=0x%llx offset=0x%llx\n",
-                    addr, offset);
+    if (f) {
+        char line[512];
+        if (fgets(line, sizeof(line), f)) {
+            uint64_t addr = 0;
+            if (sscanf(line, "%llx", &addr) == 1 && addr > 0x100000000) {
+                offset = addr - 0x100000000;
+                fprintf(stderr, "[*] Found getMaximumCapacity via nm, offset=0x%llx\n", offset);
+            }
         }
+        pclose(f);
     }
-    pclose(f);
 
-    if (offset == 0) fprintf(stderr, "[!] Symbol not found via nm\n");
+    if (offset == 0) fprintf(stderr, "[!] Could not find method offset\n");
     return offset;
 }
 

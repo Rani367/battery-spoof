@@ -4,4 +4,5 @@
 set_battery
 System Settings.app/
 batteryd
+!batteryd.bin
 *.dylib
